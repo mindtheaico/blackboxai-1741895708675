@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pond Rock Launcher</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #f0f0f0;
+            font-family: 'Arial', sans-serif;
+        }
+
+        #gameContainer {
+            position: relative;
+        }
+
+        #gameCanvas {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+        }
+
+        #instructions {
+            text-align: center;
+            color: #333;
+            margin: 10px 0;
+            font-size: 1.1em;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        #powerMeter {
+            width: 200px;
+            height: 20px;
+            background: #ddd;
+            border-radius: 10px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        #powerFill {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #FFC107);
+            transition: width 0.1s linear;
+        }
+
+        #gameOverlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 8px;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+
+        #gameMessage {
+            color: white;
+            font-size: 2.5em;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        #restartButton {
+            padding: 10px 20px;
+            font-size: 1.2em;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: transform 0.2s, background 0.2s;
+        }
+
+        #restartButton:hover {
+            background: #45a049;
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="instructions">
+            Click and hold to charge power, release to launch rock! 🎯<br>
+            Hit the red target (+10 pts) | Avoid the frogs (-5 pts) | Win at 50 pts | Lose at -20 pts
+        </div>
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="powerMeter">
+            <div id="powerFill"></div>
+        </div>
+        <div id="gameOverlay">
+            <h1 id="gameMessage"></h1>
+            <button id="restartButton">Play Again</button>
+        </div>
+    </div>
+
+    <script>
+        // Game constants
+        const CANVAS_WIDTH = 800;
+        const CANVAS_HEIGHT = 600;
+        const GRAVITY = 0.4;
+        const MAX_POWER = 20;
+        const TARGET_SPEED = 3;
+        const COMBO_TIMEOUT = 3000; // 3 seconds to maintain combo
+        const MAX_PULL_DISTANCE = 100; // Increased pull distance
+        const LAUNCH_HEIGHT = 100; // Height from bottom for launching
+        const POWER_CHARGE_RATE = 0.5; // Even slower power charge
+        const FROG_JUMP_MIN_TIME = 1000;
+        const FROG_JUMP_MAX_TIME = 2000;
+        const DAY_NIGHT_CYCLE_DURATION = 30000; // 30 seconds
+
+        // Game variables
+        let score = 0;
+        let combo = 0;
+        let lastHitTime = 0;
+        let isGameOver = false;
+        let power = 0;
+        let isCharging = false;
+        let rocks = [];
+        let dayNightCycle = 0;
+        let particles = [];
+        let aimingRock = null;
+        let mousePos = { x: 0, y: 0 };
+
+        // Canvas setup
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const powerFill = document.getElementById('powerFill');
+        const gameOverlay = document.getElementById('gameOverlay');
+        const gameMessage = document.getElementById('gameMessage');
+
+        // Sound effects
+        const sounds = {
+            splash: new Audio('data:audio/wav;base64,UklGRqRnAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YYBnAAAAAAEA/v8CAP//AgD+/wMA/f8DAP3/AwD9/wQA/P8EAPz/BAD8/wUA+/8FAPv/BQD7/wUA+/8GAPr/BgD6/wYA+v8GAPr/BgD6/wYA+v8HAP'),
+            hit: new Audio('data:audio/wav;base64,UklGRqRnAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YYBnAAAAAP8AAAEAAAD///7/AgAAAP7//v8BAAEA/v/+/wEAAQD+//7/AQABAP7//v8BAAEA/v/+/wEAAQD+//7/AQABAP7//f8CAAEA/f/+/wEAAQD+//7/AQA='),
+            ribbit: new Audio('data:audio/wav;base64,UklGRqRnAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YYBnAAAAAAEA/v8CAP//AgD+/wMA/f8DAP3/AwD9/wQA/P8EAPz/BAD8/wUA+/8FAPv/BQD7/wUA+/8GAPr/BgD6/wYA+v8GAPr/BgD6/wYA+v8HAP')
+        };
+
+        // Game objects
+        const target = {
+            x: CANVAS_WIDTH / 2,
+            y: 50,
+            radius: 15,
+            speed: TARGET_SPEED,
+            direction: 1,
+            verticalSpeed: 1,
+            verticalDirection: 1,
+            minY: 50,
+            maxY: 150
+        };
+
+        const lilyPads = Array.from({length: 5}, (_, i) => ({
+            x: 100 + (CANVAS_WIDTH - 200) * (i / 4),
+            y: CANVAS_HEIGHT - 150,
+            radius: 30
+        }));
+
+        const frogs = Array.from({length: 3}, () => ({
+            x: lilyPads[Math.floor(Math.random() * lilyPads.length)].x,
+            y: lilyPads[0].y - 10,
+            width: 20,
+            height: 15,
+            targetPad: 0,
+            jumping: false,
+            jumpHeight: 0,
+            jumpProgress: 0,
+            startX: 0,
+            targetX: 0
+        }));
+
+        // Visual effects
+        let splashes = [];
+        let scorePopups = [];
+
+        // Initialize frog jumping
+        frogs.forEach((frog, index) => {
+            setFrogJumpTimer(frog, index);
+        });
+
+        function setFrogJumpTimer(frog, index) {
+            setTimeout(() => {
+                if (!isGameOver) {
+                    const newPadIndex = Math.floor(Math.random() * lilyPads.length);
+                    const targetPad = lilyPads[newPadIndex];
+                    frog.startX = frog.x;
+                    frog.targetX = targetPad.x;
+                    frog.jumping = true;
+                    frog.jumpProgress = 0;
+                    sounds.ribbit.cloneNode().play();
+                }
+                setFrogJumpTimer(frog, index);
+            }, FROG_JUMP_MIN_TIME + Math.random() * (FROG_JUMP_MAX_TIME - FROG_JUMP_MIN_TIME));
+        }
+
+        // Event listeners
+        canvas.addEventListener('mousedown', startCharging);
+        canvas.addEventListener('mousemove', updateMousePos);
+        canvas.addEventListener('mouseup', shootRock);
+        canvas.addEventListener('mouseleave', cancelCharge);
+        document.getElementById('restartButton').addEventListener('click', restartGame);
+
+        function updateMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            mousePos.x = e.clientX - rect.left;
+            mousePos.y = e.clientY - rect.top;
+        }
+
+        function startCharging(e) {
+            if (!isGameOver) {
+                updateMousePos(e);
+                isCharging = true;
+                power = 0;
+                aimingRock = {
+                    x: CANVAS_WIDTH / 2,
+                    y: CANVAS_HEIGHT - LAUNCH_HEIGHT,
+                    radius: 8
+                };
+                chargePower();
+            }
+        }
+
+        function chargePower() {
+            if (isCharging && power < 100) {
+                power += POWER_CHARGE_RATE;
+                powerFill.style.width = power + '%';
+                requestAnimationFrame(chargePower);
+            }
+        }
+
+        function cancelCharge() {
+            isCharging = false;
+            power = 0;
+            powerFill.style.width = '0%';
+            aimingRock = null;
+        }
+
+        function shootRock(e) {
+            if (isCharging && !isGameOver) {
+                updateMousePos(e);
+                const startX = CANVAS_WIDTH / 2;
+                const startY = CANVAS_HEIGHT - LAUNCH_HEIGHT;
+                
+                const angle = Math.atan2(mousePos.y - startY, mousePos.x - startX);
+                const velocity = (power / 100) * MAX_POWER;
+                
+                rocks.push({
+                    x: startX,
+                    y: startY,
+                    radius: 8,
+                    velocityX: Math.cos(angle) * velocity * 2,
+                    velocityY: Math.sin(angle) * velocity * 2
+                });
+
+                sounds.splash.cloneNode().play();
+                createSplash(startX, startY);
+            }
+            cancelCharge();
+        }
+
+        function createSplash(x, y) {
+            splashes.push({
+                x,
+                y,
+                radius: 5,
+                alpha: 1
+            });
+        }
+
+        function createScorePopup(x, y, score) {
+            scorePopups.push({
+                x,
+                y,
+                score,
+                alpha: 1,
+                velocity: -2
+            });
+        }
+
+        function updateDayNightCycle() {
+            dayNightCycle = (dayNightCycle + 1) % DAY_NIGHT_CYCLE_DURATION;
+            const progress = dayNightCycle / DAY_NIGHT_CYCLE_DURATION;
+            const brightness = 0.7 + Math.sin(progress * Math.PI * 2) * 0.3;
+            return `rgb(${50 * brightness}, ${100 * brightness}, ${255 * brightness})`;
+        }
+
+        function checkCollisions(rock) {
+            const targetDist = Math.hypot(rock.x - target.x, rock.y - target.y);
+            if (targetDist < rock.radius + target.radius) {
+                const now = Date.now();
+                if (now - lastHitTime < COMBO_TIMEOUT) {
+                    combo++;
+                    score += 10 + (combo * 2);
+                    createScorePopup(rock.x, rock.y, `+${10 + (combo * 2)} COMBO x${combo}!`);
+                } else {
+                    combo = 1;
+                    score += 10;
+                    createScorePopup(rock.x, rock.y, '+10');
+                }
+                lastHitTime = now;
+                
+                for (let i = 0; i < 8; i++) {
+                    const angle = (Math.PI * 2 * i) / 8;
+                    particles.push({
+                        x: rock.x,
+                        y: rock.y,
+                        vx: Math.cos(angle) * 3,
+                        vy: Math.sin(angle) * 3,
+                        life: 1
+                    });
+                }
+                
+                sounds.hit.cloneNode().play();
+                return true;
+            }
+
+            for (const frog of frogs) {
+                if (rock.x + rock.radius > frog.x - frog.width/2 &&
+                    rock.x - rock.radius < frog.x + frog.width/2 &&
+                    rock.y + rock.radius > frog.y - frog.height/2 &&
+                    rock.y - rock.radius < frog.y + frog.height/2) {
+                    score -= 5;
+                    createScorePopup(rock.x, rock.y, '-5');
+                    sounds.hit.cloneNode().play();
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        function update() {
+            if (isGameOver) return;
+
+            target.x += target.speed * target.direction;
+            target.y += target.verticalSpeed * target.verticalDirection;
+            
+            if (target.x + target.radius > CANVAS_WIDTH || target.x - target.radius < 0) {
+                target.direction *= -1;
+            }
+            
+            if (target.y > target.maxY || target.y < target.minY) {
+                target.verticalDirection *= -1;
+            }
+
+            rocks = rocks.filter(rock => {
+                rock.x += rock.velocityX;
+                rock.velocityY += GRAVITY;
+                rock.y += rock.velocityY;
+
+                if (checkCollisions(rock)) return false;
+                return rock.y < CANVAS_HEIGHT && rock.x > 0 && rock.x < CANVAS_WIDTH;
+            });
+
+            splashes = splashes.filter(splash => {
+                splash.radius += 1;
+                splash.alpha -= 0.05;
+                return splash.alpha > 0;
+            });
+
+            scorePopups = scorePopups.filter(popup => {
+                popup.y += popup.velocity;
+                popup.alpha -= 0.02;
+                return popup.alpha > 0;
+            });
+
+            if (score >= 50) {
+                gameOver("You Win!");
+            } else if (score <= -20) {
+                gameOver("Game Over");
+            }
+        }
+
+        function render() {
+            ctx.fillStyle = updateDayNightCycle();
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            lilyPads.forEach(pad => {
+                ctx.beginPath();
+                ctx.fillStyle = '#2E7D32';
+                ctx.arc(pad.x, pad.y, pad.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            ctx.beginPath();
+            ctx.fillStyle = '#F44336';
+            ctx.arc(target.x, target.y, target.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(244, 67, 54, 0.3)';
+            ctx.lineWidth = 2;
+            ctx.arc(target.x, target.y, target.radius + 5, 0, Math.PI * 2);
+            ctx.stroke();
+
+            frogs.forEach(frog => {
+                if (frog.jumping) {
+                    frog.jumpProgress += 0.05;
+                    if (frog.jumpProgress >= 1) {
+                        frog.jumping = false;
+                        frog.x = frog.targetX;
+                        createSplash(frog.x, frog.y);
+                    } else {
+                        frog.x = frog.startX + (frog.targetX - frog.startX) * frog.jumpProgress;
+                        frog.jumpHeight = Math.sin(frog.jumpProgress * Math.PI) * 40;
+                    }
+                }
+
+                const drawY = frog.y - frog.jumpHeight;
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.beginPath();
+                ctx.ellipse(
+                    frog.x,
+                    drawY,
+                    frog.width/2,
+                    frog.height/2 * (1 - frog.jumpHeight/80),
+                    0,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fill();
+
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(frog.x - 5, drawY - 2, 3, 0, Math.PI * 2);
+                ctx.arc(frog.x + 5, drawY - 2, 3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.fillStyle = 'black';
+                ctx.beginPath();
+                ctx.arc(frog.x - 5, drawY - 2, 1.5, 0, Math.PI * 2);
+                ctx.arc(frog.x + 5, drawY - 2, 1.5, 0, Math.PI * 2);
+                ctx.fill();
+
+                if (frog.jumpHeight > 0) {
+                    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+                    ctx.beginPath();
+                    ctx.ellipse(
+                        frog.x,
+                        frog.y + 5,
+                        frog.width/2 * (1 - frog.jumpHeight/80),
+                        frog.height/4 * (1 - frog.jumpHeight/80),
+                        0,
+                        0,
+                        Math.PI * 2
+                    );
+                    ctx.fill();
+                }
+            });
+
+            rocks.forEach(rock => {
+                ctx.beginPath();
+                ctx.fillStyle = '#795548';
+                ctx.arc(rock.x, rock.y, rock.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            splashes.forEach(splash => {
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(255, 255, 255, ${splash.alpha})`;
+                ctx.arc(splash.x, splash.y, splash.radius, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+
+            particles = particles.filter(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02;
+                if (p.life > 0) {
+                    ctx.fillStyle = `rgba(255, 200, 0, ${p.life})`;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    return true;
+                }
+                return false;
+            });
+
+            scorePopups.forEach(popup => {
+                ctx.fillStyle = `rgba(255, 255, 255, ${popup.alpha})`;
+                ctx.font = '20px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(popup.score, popup.x, popup.y);
+            });
+
+            if (combo > 0 && Date.now() - lastHitTime < COMBO_TIMEOUT) {
+                const timeLeft = (COMBO_TIMEOUT - (Date.now() - lastHitTime)) / COMBO_TIMEOUT;
+                ctx.fillStyle = `rgba(255, 255, 255, 0.7)`;
+                ctx.fillRect(20, 60, 100 * timeLeft, 5);
+            }
+
+            const startX = CANVAS_WIDTH / 2;
+            const startY = CANVAS_HEIGHT - LAUNCH_HEIGHT;
+
+            // Draw launch platform
+            ctx.fillStyle = '#795548';
+            ctx.fillRect(startX - 25, startY - 5, 50, 10);
+
+            if (isCharging && aimingRock) {
+                // Draw elastic slingshot effect
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(255, 255, 255, 0.8)`;
+                ctx.lineWidth = 3;
+                ctx.moveTo(startX - 15, startY);
+                ctx.lineTo(startX + 15, startY);
+                ctx.stroke();
+
+                // Draw pull indicator
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.beginPath();
+                ctx.arc(startX, startY, MAX_PULL_DISTANCE, 0, Math.PI * 2);
+                ctx.stroke();
+
+                const angle = Math.atan2(mousePos.y - startY, mousePos.x - startX);
+                const pullDistance = (power / 100) * MAX_PULL_DISTANCE;
+                const pullBackX = startX - Math.cos(angle) * pullDistance;
+                const pullBackY = startY - Math.sin(angle) * pullDistance;
+
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(255, 255, 255, 0.8)`;
+                ctx.lineWidth = 2;
+                ctx.moveTo(startX - 15, startY);
+                ctx.lineTo(pullBackX, pullBackY);
+                ctx.moveTo(startX + 15, startY);
+                ctx.lineTo(pullBackX, pullBackY);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.fillStyle = '#795548';
+                ctx.arc(pullBackX, pullBackY, 8, 0, Math.PI * 2);
+                ctx.fill();
+
+                const velocity = (power / 100) * MAX_POWER * 2;
+                const velocityX = Math.cos(angle) * velocity;
+                const velocityY = Math.sin(angle) * velocity;
+                let guideX = pullBackX;
+                let guideY = pullBackY;
+                let tempVY = velocityY;
+
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(255, 255, 255, ${power/200})`;
+                ctx.lineWidth = 1;
+                ctx.moveTo(pullBackX, pullBackY);
+
+                for(let i = 0; i < 20; i++) {
+                    guideX += velocityX * 0.1;
+                    guideY += tempVY * 0.1;
+                    tempVY += GRAVITY * 0.1;
+                    ctx.lineTo(guideX, guideY);
+                }
+                ctx.stroke();
+
+                guideX = pullBackX;
+                guideY = pullBackY;
+                tempVY = velocityY;
+                
+                for(let i = 0; i < 20; i += 2) {
+                    guideX += velocityX * 0.2;
+                    guideY += tempVY * 0.2;
+                    tempVY += GRAVITY * 0.2;
+                    
+                    ctx.beginPath();
+                    ctx.fillStyle = `rgba(255, 255, 255, ${0.8 - i/20})`;
+                    ctx.arc(guideX, guideY, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else {
+                // Draw pulsing rock and glow
+                const pulse = Math.sin(dayNightCycle * 0.1) * 0.2;
+                const scale = 1 + pulse;
+                const glow = 0.2 + pulse;
+
+                // Draw glow
+                ctx.beginPath();
+                ctx.fillStyle = `rgba(255, 255, 255, ${glow})`;
+                ctx.arc(startX, startY, 15 * scale, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw rock
+                ctx.beginPath();
+                ctx.fillStyle = '#795548';
+                ctx.arc(startX, startY, 8 * scale, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw arrow
+                ctx.beginPath();
+                ctx.fillStyle = `rgba(255, 255, 255, ${glow})`;
+                ctx.moveTo(startX, startY - 20 * scale);
+                ctx.lineTo(startX - 10 * scale, startY - 10 * scale);
+                ctx.lineTo(startX + 10 * scale, startY - 10 * scale);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 24px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Score: ${score}`, 20, 40);
+        }
+
+        function gameOver(message) {
+            isGameOver = true;
+            gameMessage.textContent = message;
+            gameOverlay.style.display = 'flex';
+        }
+
+        function restartGame() {
+            score = 0;
+            isGameOver = false;
+            rocks = [];
+            splashes = [];
+            scorePopups = [];
+            target.x = CANVAS_WIDTH / 2;
+            target.direction = 1;
+            power = 0;
+            powerFill.style.width = '0%';
+            gameOverlay.style.display = 'none';
+            
+            frogs.forEach(frog => {
+                const randomPad = lilyPads[Math.floor(Math.random() * lilyPads.length)];
+                frog.x = randomPad.x;
+                frog.y = randomPad.y - 10;
+            });
+        }
+
+        function gameLoop() {
+            update();
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        gameLoop();
+    </script>
+</body>
+</html>
